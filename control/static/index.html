@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Headset control panel</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>Headset control panel</h1>
+  <p class="sub">Drives the <code>emotiv-raw</code> and <code>emotiv-cli</code> binaries over their
+     line-delimited JSON output. Electroencephalography is abbreviated EEG below.</p>
+  <div id="conn" class="pill pill-idle">disconnected</div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>1 &middot; Source</h2>
+    <div class="row">
+      <label><input type="radio" name="source" value="raw" checked>
+        Direct to the headset &mdash; no Launcher and no licence needed</label>
+      <p class="noteline">Discovery covers <strong>both</strong> transports: it scans Bluetooth Low
+         Energy for about eight seconds, then lists any Emotiv USB receiver/dongle attached. The
+         transport of each result is shown on its row.</p>
+    </div>
+    <div class="row">
+      <label><input type="radio" name="source" value="simulate">
+        Simulator &mdash; synthetic stream, no headset required</label>
+    </div>
+    <div class="row btns">
+      <button id="btn-discover">Discover headsets</button>
+      <button id="btn-start" class="primary">Start</button>
+      <button id="btn-stop" disabled>Stop</button>
+      <button id="btn-record" disabled>Start recording</button>
+    </div>
+    <div id="devices" class="devices"></div>
+    <div id="cmdline" class="cmdline"></div>
+  </section>
+
+  <section class="panel">
+    <h2>2 &middot; Stream health</h2>
+    <div class="metrics">
+      <div class="metric"><span class="k">connection</span><span class="v" id="m-link">&ndash;</span></div>
+      <div class="metric"><span class="k">packets</span><span class="v" id="m-packets">&ndash;</span></div>
+      <div class="metric"><span class="k">rate</span><span class="v" id="m-rate">&ndash;</span></div>
+      <div class="metric"><span class="k">elapsed</span><span class="v" id="m-elapsed">&ndash;</span></div>
+      <div class="metric"><span class="k">battery</span><span class="v" id="m-battery">&ndash;</span></div>
+      <div class="metric"><span class="k">continuity</span><span class="v" id="m-cont">&ndash;</span></div>
+      <div class="metric"><span class="k">clipped</span><span class="v" id="m-clip">&ndash;</span></div>
+      <div class="metric"><span class="k">root mean square</span><span class="v" id="m-rms">&ndash;</span></div>
+      <div class="metric"><span class="k">verdict</span><span class="v" id="m-verdict">&ndash;</span></div>
+    </div>
+    <p class="note">Continuity, clipping and root mean square are computed by the binary itself and
+       arrive every three seconds; they are blank until the first statistics line.</p>
+  </section>
+
+  <section class="panel">
+    <h2>3 &middot; Electrode contact quality</h2>
+    <div id="cq" class="cq"></div>
+    <p class="note">Scale is 0 to 4, 4 best. Grey means the headset has not reported a value for
+       that electrode yet.</p>
+  </section>
+
+  <section class="panel wide">
+    <h2>4 &middot; Live traces</h2>
+    <div class="row btns">
+      <label>Vertical scale
+        <select id="scale">
+          <option value="50">&plusmn;50 &micro;V</option>
+          <option value="100" selected>&plusmn;100 &micro;V</option>
+          <option value="250">&plusmn;250 &micro;V</option>
+          <option value="1000">&plusmn;1000 &micro;V</option>
+          <option value="auto">auto</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="detrend" checked> remove each channel's mean</label>
+    </div>
+    <canvas id="traces" width="1100" height="520"></canvas>
+  </section>
+
+  <section class="panel wide">
+    <h2>5 &middot; Event log</h2>
+    <pre id="log"></pre>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

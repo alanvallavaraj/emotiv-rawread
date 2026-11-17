@@ -1,0 +1,211 @@
+--- /tmp/upstream_emotiv/emotiv-0.0.14/src/raw/decryption.rs	2006-07-24 02:21:28
++++ /Users/vallava/Documents/emotiv-rs/src/raw/decryption.rs	2026-11-17 00:12:52
+@@ -11,8 +11,20 @@
+ use anyhow::{anyhow, Result};
+ 
+ /// Full decrypted packet state.
++/// How the plaintext of a packet is laid out.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum PacketFormat {
++    /// The layout this crate shipped with: 16-bit counter, bit-packed samples.
++    Legacy,
++    /// EPOC and EPOC+ over the USB receiver. A single-byte counter, then one
++    /// BYTE PAIR per electrode - not bit-packed. Verified against a live
++    /// EPOC+ on 17 Nov 2026; mirrors CymatiCorp/CyKit `example_epoc_plus.py`.
++    EpocPlusPairs,
++}
++
+ pub struct Decryptor {
+     model: HeadsetModel,
++    format: PacketFormat,
+     aes_key: Vec<u8>,
+     counter: u32,
+     physical_min: f64,
+@@ -39,6 +51,7 @@
+ 
+         Ok(Self {
+             model,
++            format: PacketFormat::Legacy,
+             aes_key,
+             counter: 0,
+             physical_min,
+@@ -47,6 +60,85 @@
+         })
+     }
+ 
++    /// Create a decryptor from an already-derived 16-byte key.
++    ///
++    /// The derivations in this module all require a 12-character serial, but
++    /// the EPOC and EPOC+ hardware uses schemes that need only the last FOUR
++    /// characters (see [`emokit_keys`]). Those cannot go through
++    /// [`Self::new`], so they are built here instead.
++    pub fn with_key(model: HeadsetModel, aes_key: Vec<u8>) -> Result<Self> {
++        if aes_key.len() != 16 {
++            return Err(anyhow!("AES key must be 16 bytes, got {}", aes_key.len()));
++        }
++        let (physical_min, physical_max) = model.eeg_physical_range();
++        let digital_max = match model {
++            HeadsetModel::Xtrodes => 65535i32,
++            _ => 16383i32,
++        };
++        Ok(Self {
++            model,
++            // The keys built this way come from the EPOC/EPOC+ hardware
++            // schemes, and that hardware uses the byte-pair layout.
++            format: PacketFormat::EpocPlusPairs,
++            aes_key,
++            counter: 0,
++            physical_min,
++            physical_max,
++            digital_max,
++        })
++    }
++
++    /// Decode an EPOC/EPOC+ receiver packet, whose plaintext is a one-byte
++    /// counter followed by one big-endian-ish BYTE PAIR per electrode.
++    ///
++    /// Seven electrodes occupy bytes 2..16 and seven more bytes 18..32; bytes
++    /// 16 and 17 are skipped. The microvolt conversion is the one the EPOC+
++    /// firmware uses, reproduced from CyKit.
++    ///
++    /// Packets whose second byte is 32 carry no motion payload and are
++    /// rejected, matching CyKit, which drops them rather than decoding.
++    fn decode_epoc_plus_pairs(&mut self, decrypted: &[u8]) -> Result<DecryptedData> {
++        if decrypted.len() < 32 {
++            return Err(anyhow!(
++                "EPOC+ packet must be 32 bytes, got {}",
++                decrypted.len()
++            ));
++        }
++        if decrypted[1] == 32 {
++            return Err(anyhow!("EPOC+ packet carries no sample payload"));
++        }
++
++        let counter = decrypted[0];
++        self.counter = counter as u32;
++
++        let mut eeg_uv = Vec::with_capacity(14);
++        let mut eeg_adc = Vec::with_capacity(14);
++        for range in [(2usize..16usize), (18usize..32usize)] {
++            for i in range.step_by(2) {
++                let (a, b) = (decrypted[i], decrypted[i + 1]);
++                eeg_uv.push(epoc_plus_microvolts(a, b));
++                eeg_adc.push(u16::from_be_bytes([a, b]) as i32);
++            }
++        }
++
++        // Contact quality and battery live elsewhere in this format and are
++        // not yet decoded. Reporting zeros is deliberate: inventing values
++        // from the wrong offsets is what made the earlier output look
++        // plausible while being meaningless.
++        let contact_quality = vec![0u8; eeg_uv.len()];
++        let signal_quality = 0u8;
++        let battery_percent = 0u8;
++
++        Ok(DecryptedData::new(
++            counter as u32,
++            eeg_uv,
++            eeg_adc,
++            contact_quality,
++            signal_quality,
++            battery_percent,
++        ))
++    }
++
+     /// Decrypt and extract EEG data from a BLE/USB packet.
+     pub fn decrypt_eeg_packet(&mut self, encrypted_data: &[u8]) -> Result<DecryptedData> {
+         if encrypted_data.len() < 20 {
+@@ -55,6 +147,10 @@
+ 
+         // Decrypt using AES-ECB
+         let decrypted = aes_ecb_decrypt(&self.aes_key, encrypted_data)?;
++
++        if self.format == PacketFormat::EpocPlusPairs {
++            return self.decode_epoc_plus_pairs(&decrypted);
++        }
+ 
+         // Extract counter (bytes 0-1)
+         let packet_counter = u16::from_be_bytes([decrypted[0], decrypted[1]]) as u32;
+@@ -418,3 +514,82 @@
+         assert!(samples[0] > 0);
+     }
+ }
++
++
++/// Key derivations used by the open-source EPOC drivers.
++///
++/// These build the 16-byte AES key from the LAST FOUR characters of the
++/// serial, unlike the derivations above which index twelve. They are what the
++/// EPOC and EPOC+ hardware actually uses, mirrored from `openyou/emokit`
++/// (`python/emokit/util.py`) and `CymatiCorp/CyKit`
++/// (`Examples/example_epoc_plus.py`), which agree with each other.
++///
++/// Note the serial that matters is the one the USB receiver reports, not the
++/// one printed on the headset: on this hardware the receiver's serial is what
++/// keys the stream.
++pub mod emokit_keys {
++    /// The derivation CyKit uses for the EPOC+ (`new_crypto_key` in emokit).
++    pub fn new_crypto(serial: &str) -> Option<Vec<u8>> {
++        let s: Vec<char> = serial.chars().collect();
++        let n = s.len();
++        if n < 4 {
++            return None;
++        }
++        let (a, b, c, d) = (s[n - 1], s[n - 2], s[n - 3], s[n - 4]);
++        let k = [a, b, b, c, c, c, b, d, a, d, b, b, d, d, b, a];
++        Some(k.iter().map(|&ch| ch as u8).collect())
++    }
++
++    /// emokit's `epoc_plus_crypto_key`, which interleaves fixed bytes.
++    pub fn epoc_plus(serial: &str) -> Option<Vec<u8>> {
++        let s: Vec<char> = serial.chars().collect();
++        let n = s.len();
++        if n < 4 {
++            return None;
++        }
++        let (a, b, c, d) = (s[n - 1] as u8, s[n - 2] as u8, s[n - 3] as u8, s[n - 4] as u8);
++        Some(vec![a, 0x00, b, 0x15, c, 0x00, d, 0x0C, c, 0x00, b, b'D', a, 0x00, b, b'X'])
++    }
++
++    /// emokit's `crypto_key` with `is_research = false`.
++    pub fn consumer(serial: &str) -> Option<Vec<u8>> {
++        let s: Vec<char> = serial.chars().collect();
++        let n = s.len();
++        if n < 4 {
++            return None;
++        }
++        let (a, b, c, d) = (s[n - 1] as u8, s[n - 2] as u8, s[n - 3] as u8, s[n - 4] as u8);
++        Some(vec![a, 0x00, b, b'T', c, 0x10, d, b'B', a, 0x00, b, b'H', c, 0x00, d, b'P'])
++    }
++
++    /// emokit's `crypto_key` with `is_research = true`.
++    pub fn research(serial: &str) -> Option<Vec<u8>> {
++        let s: Vec<char> = serial.chars().collect();
++        let n = s.len();
++        if n < 4 {
++            return None;
++        }
++        let (a, b, c, d) = (s[n - 1] as u8, s[n - 2] as u8, s[n - 3] as u8, s[n - 4] as u8);
++        Some(vec![a, 0x00, b, b'H', a, 0x00, b, b'T', c, 0x10, d, b'B', c, 0x00, d, b'P'])
++    }
++
++    /// Every derivation, in the order worth trying.
++    pub const ALL: [(&str, fn(&str) -> Option<Vec<u8>>); 4] = [
++        ("new_crypto", new_crypto),
++        ("epoc_plus", epoc_plus),
++        ("consumer", consumer),
++        ("research", research),
++    ];
++}
++
++
++/// The EPOC+ byte-pair to microvolt conversion used by the firmware.
++///
++/// Reproduced from CymatiCorp/CyKit `example_epoc_plus.py`
++/// (`convertEPOC_PLUS`). Verified on live hardware: with the headset off the
++/// head every channel sits near 4249 with a 2-11 uV spread, against the
++/// ~4800 uV uniform noise a wrong key or layout produces.
++fn epoc_plus_microvolts(value_1: u8, value_2: u8) -> f64 {
++    (f64::from(value_1) * 0.128_205_128_205_129) + 4201.025_640_960_01
++        + ((f64::from(value_2) - 128.0) * 32.820_512_89)
++}

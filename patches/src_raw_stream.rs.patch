@@ -1,0 +1,45 @@
+--- /tmp/upstream_emotiv/emotiv-0.0.14/src/raw/stream.rs	2006-07-24 02:21:28
++++ /Users/vallava/Documents/emotiv-rs/src/raw/stream.rs	2026-11-16 23:43:44
+@@ -35,6 +35,22 @@
+     let stop = Arc::new(Notify::new());
+     let stats = Arc::new(Mutex::new(StreamDebugStats::default()));
+ 
++    // A headset reached through the USB receiver is read directly from HID;
++    // everything downstream of the packet - decryption, channel unpacking,
++    // the data channel and the handle - is shared with the Bluetooth path.
++    #[cfg(all(feature = "usb", not(target_arch = "wasm32")))]
++    if info.transport == crate::raw::device::TransportType::Usb {
++        let streamer = crate::raw::usb::UsbStreamer {
++            info,
++            tx,
++            stop: Arc::clone(&stop),
++            state: state_tx,
++            stats: Arc::clone(&stats),
++        };
++        platform::spawn(streamer.run());
++        return (rx, RawDeviceHandle::new(state_rx, stop, stats));
++    }
++
+     let task = Streamer {
+         info,
+         policy,
+@@ -210,6 +226,19 @@
+             match platform::timeout(Duration::from_secs(5), notifications.next()).await {
+                 Ok(Some((uuid, payload))) => {
+                     silence_timeouts = 0;
++                    // EMOTIV_DUMP_RAW=1 prints each notification as hex before
++                    // decryption, for offline analysis without the headset.
++                    if std::env::var("EMOTIV_DUMP_RAW").is_ok() {
++                        let hex: String =
++                            payload.iter().map(|b| format!("{b:02x}")).collect();
++                        println!(
++                            "{}",
++                            serde_json::json!({
++                                "type": "raw", "src": "ble",
++                                "uuid": uuid.to_string(), "hex": hex
++                            })
++                        );
++                    }
+                     let decoded = pipeline.push(uuid, &payload);
+                     self.record(pipeline, uuid, payload.len());
+                     for data in decoded {

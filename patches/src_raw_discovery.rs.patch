@@ -1,0 +1,62 @@
+--- /tmp/upstream_emotiv/emotiv-0.0.14/src/raw/discovery.rs	2006-07-24 02:21:28
++++ /Users/vallava/Documents/emotiv-rs/src/raw/discovery.rs	2026-11-16 22:03:30
+@@ -41,13 +41,32 @@
+ pub(crate) const EMOTIV_SERVICE_1103: Uuid =
+     Uuid::from_u128(0x00001103_d102_11e1_9b23_00025b00a5a5);
+ 
++/// The EPOC+ vendor service, which uses an entirely different identifier
++/// family from the `1100-d102` services above.
++///
++/// Verified against an EPOC+ (firmware 0x0633) on 16 Nov 2026 by enumerating
++/// its GATT table directly. It exposes four characteristics: `…2f41` notifies
++/// encrypted EEG at roughly 257 notifications a second, `…2f42` notifies
++/// motion at roughly 32, `…2f43` is writable and notifying, and `…2f44` reads
++/// back a six-byte status word.
++///
++/// Notifications begin as soon as they are subscribed to — no start-stream
++/// command is needed — and a 32-byte packet arrives as 20 + 12 at the default
++/// MTU, which the decode pipeline already reassembles.
++///
++/// Without this service listed, a grant reaches none of the above and the
++/// connection fails with "no accessible primary services on this device".
++pub(crate) const EMOTIV_SERVICE_EPOC_PLUS: Uuid =
++    Uuid::from_u128(0x81072f40_9f3d_11e3_a9dc_0002a5d5c51b);
++
+ /// Every vendor service a headset may expose. Named in each grant, because
+ /// `get_characteristics` only reaches the services a grant lists.
+-pub(crate) const EMOTIV_SERVICES: [Uuid; 4] = [
++pub(crate) const EMOTIV_SERVICES: [Uuid; 5] = [
+     EMOTIV_DATA_SERVICE,
+     EMOTIV_CONTROL_SERVICE,
+     EMOTIV_SERVICE_1102,
+     EMOTIV_SERVICE_1103,
++    EMOTIV_SERVICE_EPOC_PLUS,
+ ];
+ 
+ /// Battery Level — excluded from the fallback notify set, since it is never EEG.
+@@ -271,9 +290,23 @@
+     Ok(matched_devices)
+ }
+ 
+-/// Discover USB devices (not yet implemented).
++/// Discover Emotiv USB receivers/dongles currently attached.
++///
++/// Enumeration is a blocking HID call, so it runs on the blocking pool rather
++/// than stalling the async executor. Without the `usb` feature this returns an
++/// empty list, exactly as it did before the transport existed.
+ pub(crate) async fn discover_usb_devices() -> Result<Vec<DeviceInfo>> {
+-    Ok(Vec::new())
++    #[cfg(all(feature = "usb", not(target_arch = "wasm32")))]
++    {
++        match tokio::task::spawn_blocking(crate::raw::usb::enumerate).await {
++            Ok(result) => result,
++            Err(e) => Err(anyhow::anyhow!("USB enumeration task failed: {e}")),
++        }
++    }
++    #[cfg(not(all(feature = "usb", not(target_arch = "wasm32"))))]
++    {
++        Ok(Vec::new())
++    }
+ }
+ 
+ /// The platform id is the Bluetooth address everywhere but Apple, where it is

@@ -1,0 +1,204 @@
+--- /tmp/upstream_emotiv/emotiv-0.0.14/src/bin/cli/native.rs	2006-07-24 02:21:28
++++ /Users/vallava/Documents/emotiv-rs/src/bin/cli/native.rs	2026-10-30 22:21:49
+@@ -13,6 +13,10 @@
+     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+ 
+     let simulate = std::env::args().any(|a| a == "--simulate");
++    // `--json` makes stdout a line-delimited JSON stream and suppresses the
++    // human-readable lines. Log output stays on stderr via env_logger, so
++    // stdout carries nothing but one JSON object per line.
++    let json_out = std::env::args().any(|a| a == "--json");
+ 
+     #[cfg(not(feature = "simulate"))]
+     if simulate {
+@@ -41,9 +45,15 @@
+         let client_secret = std::env::var("EMOTIV_CLIENT_SECRET")
+             .unwrap_or_else(|_| "your_client_secret".into());
+ 
++        // Premium streams (raw `eeg`, high-rate metrics) are gated on the
++        // licence being sent in `authorize`. Upstream leaves this empty, which
++        // silently authorises on the free tier.
++        let license = std::env::var("EMOTIV_LICENSE").unwrap_or_default();
++
+         let config = CortexClientConfig {
+             client_id,
+             client_secret,
++            license,
+             debug_mode: std::env::var("EMOTIV_DEBUG").is_ok(),
+             ..Default::default()
+         };
+@@ -104,9 +114,21 @@
+     let mut eeg_count = 0u64;
+     while let Some(event) = rx.recv().await {
+         match event {
+-            CortexEvent::Connected => info!("✅ Connected to Cortex service"),
+-            CortexEvent::Authorized => info!("🔑 Authorized successfully"),
++            CortexEvent::Connected => {
++                if json_out { println!("{}", serde_json::json!({"type": "status", "event": "connected"})); }
++                info!("✅ Connected to Cortex service");
++            }
++            CortexEvent::Authorized => {
++                if json_out { println!("{}", serde_json::json!({"type": "status", "event": "authorized"})); }
++                info!("🔑 Authorized successfully");
++            }
+             CortexEvent::SessionCreated(id) => {
++                if json_out {
++                    println!(
++                        "{}",
++                        serde_json::json!({"type": "status", "event": "session_created", "session": id})
++                    );
++                }
+                 info!("📋 Session created: {id}");
+                 if let Some(ref h) = handle {
+                     if let Err(e) = h.subscribe(&["eeg", "mot", "dev", "met", "pow"]).await {
+@@ -114,47 +136,131 @@
+                     }
+                 }
+             }
+-            CortexEvent::Disconnected => { info!("❌ Disconnected"); break; }
+-            CortexEvent::Error(msg) => error!("⚠️  Error: {msg}"),
++            CortexEvent::Disconnected => {
++                if json_out { println!("{}", serde_json::json!({"type": "status", "event": "disconnected"})); }
++                info!("❌ Disconnected");
++                break;
++            }
++            CortexEvent::Error(msg) => {
++                if json_out { println!("{}", serde_json::json!({"type": "error", "message": msg})); }
++                error!("⚠️  Error: {msg}");
++            }
+             CortexEvent::Eeg(data) => {
+                 eeg_count += 1;
+-                if eeg_count % 128 == 1 {
++                if json_out {
++                    // Every sample, full precision - not the 5-channel preview.
++                    println!(
++                        "{}",
++                        serde_json::json!({
++                            "type": "eeg",
++                            "n": eeg_count,
++                            "t": data.time,
++                            "samples": data.samples,
++                        })
++                    );
++                } else if eeg_count % 128 == 1 {
+                     let preview: Vec<String> = data.samples.iter().take(5)
+                         .map(|v| format!("{v:+8.3}")).collect();
+                     println!("[EEG] #{eeg_count:<8} t={:.3}  [{} ...]", data.time, preview.join(", "));
+                 }
+             }
+             CortexEvent::Motion(data) => {
+-                let acc = &data.samples[6..9.min(data.samples.len())];
+-                println!("[MOT] t={:.3}  acc=[{:.4}, {:.4}, {:.4}]",
+-                    data.time, acc.first().unwrap_or(&0.0), acc.get(1).unwrap_or(&0.0), acc.get(2).unwrap_or(&0.0));
++                if json_out {
++                    println!(
++                        "{}",
++                        serde_json::json!({"type": "motion", "t": data.time, "samples": data.samples})
++                    );
++                } else {
++                    let acc = &data.samples[6..9.min(data.samples.len())];
++                    println!("[MOT] t={:.3}  acc=[{:.4}, {:.4}, {:.4}]",
++                        data.time, acc.first().unwrap_or(&0.0), acc.get(1).unwrap_or(&0.0), acc.get(2).unwrap_or(&0.0));
++                }
+             }
+             CortexEvent::Dev(data) => {
+-                println!("[DEV] battery={:.0}%  signal={:.1}  cq={:?}",
+-                    data.battery_percent, data.signal, &data.contact_quality[..5.min(data.contact_quality.len())]);
++                if json_out {
++                    println!(
++                        "{}",
++                        serde_json::json!({
++                            "type": "dev",
++                            "battery_percent": data.battery_percent,
++                            "signal": data.signal,
++                            "contact_quality": data.contact_quality,
++                        })
++                    );
++                } else {
++                    println!("[DEV] battery={:.0}%  signal={:.1}  cq={:?}",
++                        data.battery_percent, data.signal, &data.contact_quality[..5.min(data.contact_quality.len())]);
++                }
+             }
+             CortexEvent::Metrics(data) => {
+-                let eng = data.values.get(1).unwrap_or(&0.0);
+-                let exc = data.values.get(3).unwrap_or(&0.0);
+-                let foc = data.values.get(12).unwrap_or(&0.0);
+-                println!("[MET] engagement={eng:.3}  excitement={exc:.3}  focus={foc:.3}");
++                if json_out {
++                    println!("{}", serde_json::json!({"type": "metrics", "values": data.values}));
++                } else {
++                    let eng = data.values.get(1).unwrap_or(&0.0);
++                    let exc = data.values.get(3).unwrap_or(&0.0);
++                    let foc = data.values.get(12).unwrap_or(&0.0);
++                    println!("[MET] engagement={eng:.3}  excitement={exc:.3}  focus={foc:.3}");
++                }
+             }
+             CortexEvent::BandPower(data) => {
+-                let preview: Vec<String> = data.powers.iter().take(5).map(|v| format!("{v:.3}")).collect();
+-                println!("[POW] [{} ...]", preview.join(", "));
++                if json_out {
++                    println!("{}", serde_json::json!({"type": "pow", "powers": data.powers}));
++                } else {
++                    let preview: Vec<String> = data.powers.iter().take(5).map(|v| format!("{v:.3}")).collect();
++                    println!("[POW] [{} ...]", preview.join(", "));
++                }
+             }
+             CortexEvent::MentalCommand(data) => {
+-                println!("[COM] action={:<10} power={:.3}", data.action, data.power);
++                if json_out {
++                    println!(
++                        "{}",
++                        serde_json::json!({"type": "command", "action": data.action, "power": data.power})
++                    );
++                } else {
++                    println!("[COM] action={:<10} power={:.3}", data.action, data.power);
++                }
+             }
+             CortexEvent::FacialExpression(data) => {
+-                println!("[FAC] eye={:<10} upper={}({:.2}) lower={}({:.2})",
+-                    data.eye_action, data.upper_action, data.upper_power, data.lower_action, data.lower_power);
++                if json_out {
++                    println!(
++                        "{}",
++                        serde_json::json!({
++                            "type": "facial",
++                            "eye_action": data.eye_action,
++                            "upper_action": data.upper_action,
++                            "upper_power": data.upper_power,
++                            "lower_action": data.lower_action,
++                            "lower_power": data.lower_power,
++                        })
++                    );
++                } else {
++                    println!("[FAC] eye={:<10} upper={}({:.2}) lower={}({:.2})",
++                        data.eye_action, data.upper_action, data.upper_power, data.lower_action, data.lower_power);
++                }
+             }
+             CortexEvent::DataLabels(labels) => {
+-                println!("[LABELS] {}: {:?}", labels.stream_name, labels.labels);
++                if json_out {
++                    println!(
++                        "{}",
++                        serde_json::json!({
++                            "type": "labels",
++                            "stream": labels.stream_name,
++                            "labels": labels.labels,
++                        })
++                    );
++                } else {
++                    println!("[LABELS] {}: {:?}", labels.stream_name, labels.labels);
++                }
+             }
+             CortexEvent::Warning { code, message } => {
+-                println!("[WARN] code={code} msg={message}");
++                if json_out {
++                    println!(
++                        "{}",
++                        serde_json::json!({"type": "warning", "code": code, "message": message})
++                    );
++                } else {
++                    println!("[WARN] code={code} msg={message}");
++                }
+             }
+             _ => {}
+         }

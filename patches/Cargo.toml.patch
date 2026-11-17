@@ -1,0 +1,22 @@
+--- /tmp/upstream_emotiv/emotiv-0.0.14/Cargo.toml.orig	2006-07-24 02:21:28
++++ /Users/vallava/Documents/emotiv-rs/Cargo.toml	2026-11-16 21:22:42
+@@ -102,6 +102,9 @@
+ simulate = []
+ config-toml = ["dep:toml"]
+ raw      = ["dep:webbluetooth", "dep:webbluetooth-wasm", "dep:aes", "dep:cipher"]
++# Direct USB receiver/dongle access (EPOC and EPOC+ era hardware). Native only:
++# hidapi has no wasm target, so the browser build keeps using `raw` alone.
++usb      = ["dep:hidapi", "dep:aes", "dep:cipher"]
+ 
+ # ── Core dependencies ─────────────────────────────────────────────────────────
+ 
+@@ -145,6 +148,9 @@
+ # the local Cortex service), the binaries and the TUI are native by nature.
+ 
+ [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++# USB receiver/dongle transport. Emotiv's dongle is a plain HID device, so
++# hidapi (IOKit on macOS) is enough - no kernel extension or driver needed.
++hidapi = { version = "2", optional = true }
+ tokio             = { version = "1", features = ["full"] }
+ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+ rustls            = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }

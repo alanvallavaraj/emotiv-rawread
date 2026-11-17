@@ -1,0 +1,28 @@
+--- /tmp/upstream_emotiv/emotiv-0.0.14/src/raw/pipeline.rs	2006-07-24 02:21:28
++++ /Users/vallava/Documents/emotiv-rs/src/raw/pipeline.rs	2026-11-17 00:02:38
+@@ -552,6 +552,25 @@
+             }
+         }
+     }
++
++    // The derivations above all need a 12-character serial. EPOC and EPOC+
++    // hardware keys from the last FOUR characters instead, so those schemes
++    // are added here - without them an 8-character serial yields no candidate
++    // at all and the stream decrypts to noise.
++    for serial in serials {
++        for (name, derive) in crate::raw::decryption::emokit_keys::ALL {
++            let Some(key) = derive(serial) else { continue };
++            for &m in &models {
++                if let Ok(decryptor) = Decryptor::with_key(m, key.clone()) {
++                    out.push(KeyCandidate {
++                        serial: format!("{serial}/{name}"),
++                        model: m,
++                        decryptor,
++                    });
++                }
++            }
++        }
++    }
+     out
+ }
+ 

@@ -1,0 +1,359 @@
+//! USB receiver/dongle transport.
+//!
+//! Emotiv's EPOC and EPOC+ headsets reach the computer through a small USB
+//! receiver that presents itself as a plain HID device — no driver and no
+//! kernel extension. This module enumerates those receivers so a headset
+//! paired to one can be discovered and streamed exactly like a Bluetooth one.
+//!
+//! Only the transport lives here. Decryption and channel unpacking are shared
+//! with the Bluetooth path ([`crate::raw::pipeline::DecodePipeline`]), because
+//! the packet payload is the same once it has been carried across.
+
+use anyhow::{Context, Result};
+
+use super::device::{DeviceInfo, TransportType};
+use super::discovery::infer_model_from_name;
+use super::types::HeadsetModel;
+
+/// USB identifiers known to be Emotiv receivers.
+///
+/// `0x1234:0xed02` is the "Brain Computer Interface USB Receiver/Dongle" that
+/// ships with the EPOC+; the neighbouring product id is the earlier EPOC
+/// receiver. Devices outside this list are still accepted when their USB
+/// manufacturer or product string identifies them, so an unlisted revision is
+/// recognised rather than silently ignored.
+/// HID usage page of the receiver interface that carries EEG reports.
+/// The control interface uses 0xf0ff and never delivers samples.
+pub(crate) const DATA_USAGE_PAGE: u16 = 0xffff;
+
+pub(crate) const KNOWN_IDS: [(u16, u16); 3] = [
+    (0x1234, 0xed02),
+    (0x1234, 0xed01),
+    (0x21a1, 0x0001),
+];
+
+/// Whether a HID device looks like an Emotiv receiver.
+pub(crate) fn is_emotiv_receiver(vendor_id: u16, product_id: u16, manufacturer: &str, product: &str) -> bool {
+    if KNOWN_IDS.contains(&(vendor_id, product_id)) {
+        return true;
+    }
+    let m = manufacturer.to_ascii_lowercase();
+    let p = product.to_ascii_lowercase();
+    m.contains("emotiv")
+        || p.contains("emotiv")
+        || p.contains("brain computer interface")
+}
+
+/// Every Emotiv USB receiver currently attached.
+///
+/// A receiver being present does not mean a headset is switched on and paired
+/// to it: the receiver enumerates on its own. That distinction only shows up
+/// once streaming starts and packets either arrive or do not.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn enumerate() -> Result<Vec<DeviceInfo>> {
+    let api = hidapi::HidApi::new().context("opening the HID subsystem")?;
+    let mut candidates: Vec<(bool, DeviceInfo)> = Vec::new();
+
+    for info in api.device_list() {
+        let manufacturer = info.manufacturer_string().unwrap_or_default();
+        let product = info.product_string().unwrap_or_default();
+        if !is_emotiv_receiver(info.vendor_id(), info.product_id(), manufacturer, product) {
+            continue;
+        }
+
+        let serial = info.serial_number().unwrap_or_default().to_string();
+        let path = info.path().to_string_lossy().to_string();
+
+        // A receiver exposes SEVERAL HID interfaces and only ONE carries EEG.
+        // On the EPOC+ receiver the data interface reports usage page 0xffff
+        // while the control interface reports 0xf0ff, so they are told apart
+        // here rather than left for the caller to guess. Collapsing them by
+        // serial (the first attempt) kept the wrong one, which opened fine
+        // and then delivered nothing.
+        let iface = info.interface_number();
+        let usage_page = info.usage_page();
+        let is_data = usage_page == DATA_USAGE_PAGE;
+
+        log::debug!(
+            "  HID interface {iface}: usage_page={usage_page:#06x} usage={:#06x} \
+             data={is_data} path={path}",
+            info.usage()
+        );
+
+        let name = if product.is_empty() {
+            "Emotiv USB Receiver".to_string()
+        } else {
+            product.to_string()
+        };
+
+        // The receiver's product string names the receiver, not the headset,
+        // so there is usually nothing to infer a model from. EPOC+ is the
+        // headset this receiver shipped with; override with `--model` or
+        // `DeviceInfo::with_model` for anything else.
+        let model = infer_model_from_name(&name).unwrap_or(HeadsetModel::EpocPlus);
+
+        // Announced after filtering, not here: logging every interface made
+        // one receiver look like two devices.
+        log::debug!(
+            "Candidate Emotiv USB interface {iface}: {name} (serial {}, {:04x}:{:04x})",
+            if serial.is_empty() { "unknown" } else { &serial },
+            info.vendor_id(),
+            info.product_id(),
+        );
+
+        candidates.push((is_data, DeviceInfo {
+            name,
+            address: path.clone(),
+            ble_id: path,
+            ble_mac: None,
+            serial,
+            model,
+            transport: TransportType::Usb,
+            battery_percent: 0,
+            is_connected: true,
+        }));
+    }
+
+    // Report only the interface that carries EEG. Listing the control
+    // interface alongside it offers a choice that is never the right one:
+    // selecting it opens successfully and then streams nothing.
+    let any_data = candidates.iter().any(|(is_data, _)| *is_data);
+    let found: Vec<DeviceInfo> = candidates
+        .into_iter()
+        .filter(|(is_data, _)| !any_data || *is_data)
+        .map(|(_, d)| d)
+        .collect();
+
+    for d in &found {
+        log::info!(
+            "Found Emotiv USB receiver: {} (serial {})",
+            d.name,
+            if d.serial.is_empty() { "unknown" } else { &d.serial }
+        );
+    }
+
+    if found.is_empty() {
+        log::debug!("No Emotiv USB receiver attached.");
+    } else if !any_data {
+        log::warn!(
+            "No HID interface reports the data usage page ({DATA_USAGE_PAGE:#06x}); \
+             listing all interfaces, and streaming may find none of them carry EEG."
+        );
+    }
+    Ok(found)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn enumerate() -> Result<Vec<DeviceInfo>> {
+    Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognises_the_epoc_plus_receiver_by_id() {
+        assert!(is_emotiv_receiver(0x1234, 0xed02, "", ""));
+    }
+
+    #[test]
+    fn recognises_an_unlisted_revision_by_its_strings() {
+        assert!(is_emotiv_receiver(
+            0x9999,
+            0x9999,
+            "Emotiv",
+            "Brain Computer Interface USB Receiver/Dongle"
+        ));
+    }
+
+    #[test]
+    fn ignores_unrelated_hid_devices() {
+        assert!(!is_emotiv_receiver(0x05ac, 0x0256, "Apple Inc.", "Magic Keyboard"));
+    }
+}
+
+
+// ── Streaming ────────────────────────────────────────────────────────────────
+
+#[cfg(not(target_arch = "wasm32"))]
+mod streaming {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use tokio::sync::{mpsc, watch, Notify};
+    use uuid::Uuid;
+
+    use crate::raw::device::{DeviceInfo, StreamDebugStats};
+    use crate::raw::discovery::serial_candidates;
+    use crate::raw::pipeline::DecodePipeline;
+    use crate::raw::types::{DecryptedData, DeviceState};
+
+    /// The receiver is a single stream of packets, not a set of characteristics
+    /// like Bluetooth, so the pipeline is given one fixed key to track it by.
+    /// The value is arbitrary; only its constancy matters.
+    const USB_STREAM_UUID: Uuid = Uuid::from_u128(0x0000_1000_0000_1000_8000_00805f9b34fb);
+
+    /// How long a blocking read waits before coming back empty so the stop
+    /// flag can be checked.
+    const READ_TIMEOUT_MS: i32 = 250;
+
+    /// Logged once if nothing decodes within this long — the symptom of a
+    /// receiver that is attached while its headset is off or unpaired.
+    const SILENCE_WARNING: Duration = Duration::from_secs(5);
+
+    pub(crate) struct UsbStreamer {
+        pub(crate) info: DeviceInfo,
+        pub(crate) tx: mpsc::Sender<DecryptedData>,
+        pub(crate) stop: Arc<Notify>,
+        pub(crate) state: watch::Sender<DeviceState>,
+        pub(crate) stats: Arc<Mutex<StreamDebugStats>>,
+    }
+
+    impl UsbStreamer {
+        pub(crate) async fn run(self) {
+            let _ = self.state.send(DeviceState::Connecting);
+
+            // The HID read is blocking, so the loop lives on the blocking pool
+            // and learns about disconnect requests through a flag rather than
+            // by being awaited.
+            let stop_flag = Arc::new(AtomicBool::new(false));
+            let watcher = Arc::clone(&stop_flag);
+            let stop = Arc::clone(&self.stop);
+            tokio::spawn(async move {
+                stop.notified().await;
+                watcher.store(true, Ordering::Relaxed);
+            });
+
+            let info = self.info.clone();
+            let tx = self.tx.clone();
+            let stats = Arc::clone(&self.stats);
+            let state = self.state.clone();
+            let flag = Arc::clone(&stop_flag);
+
+            let result =
+                tokio::task::spawn_blocking(move || read_loop(info, tx, stats, state, flag)).await;
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => log::error!("USB streaming error: {e:#}"),
+                Err(e) => log::error!("USB streaming task failed: {e}"),
+            }
+            let _ = self.state.send(DeviceState::Disconnected);
+        }
+    }
+
+    /// Lower-case hex, for raw capture dumps.
+    pub(crate) fn hex_of(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn read_loop(
+        info: DeviceInfo,
+        tx: mpsc::Sender<DecryptedData>,
+        stats: Arc<Mutex<StreamDebugStats>>,
+        state: watch::Sender<DeviceState>,
+        stop: Arc<AtomicBool>,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context;
+
+        let api = hidapi::HidApi::new().context("opening the HID subsystem")?;
+        let path = std::ffi::CString::new(info.address.as_str())
+            .context("the receiver's device path is not a valid C string")?;
+        let device = api
+            .open_path(&path)
+            .with_context(|| format!("opening the Emotiv receiver at {}", info.address))?;
+
+        log::info!(
+            "Opened Emotiv USB receiver {} (serial {})",
+            info.name,
+            if info.serial.is_empty() { "unknown" } else { &info.serial }
+        );
+        let _ = state.send(DeviceState::Connected);
+
+        let dump_raw = std::env::var("EMOTIV_DUMP_RAW").is_ok();
+        let mut pipeline = DecodePipeline::new(info.model, &serial_candidates(&info))?;
+        let mut buf = [0u8; 64];
+        let started = Instant::now();
+        let mut warned_silent = false;
+        let mut streaming = false;
+
+        while !stop.load(Ordering::Relaxed) {
+            let read = device.read_timeout(&mut buf, READ_TIMEOUT_MS);
+            let n = match read {
+                Ok(n) => n,
+                Err(e) => {
+                    log::error!("USB read failed: {e}");
+                    break;
+                }
+            };
+
+            if n == 0 {
+                // A timeout is normal: it is how the loop stays responsive to
+                // a disconnect request while no packets are arriving.
+                if let Ok(mut s) = stats.lock() {
+                    s.timeout_count += 1;
+                }
+                if !warned_silent && !streaming && started.elapsed() > SILENCE_WARNING {
+                    warned_silent = true;
+                    log::warn!(
+                        "The receiver is attached but has sent nothing for {} s. \
+                         Usually the headset is switched off, out of range, or not paired \
+                         to this receiver.",
+                        SILENCE_WARNING.as_secs()
+                    );
+                }
+                continue;
+            }
+
+            let payload = &buf[..n];
+
+            // EMOTIV_DUMP_RAW=1 prints each report as hex before decryption,
+            // so a capture can be analysed offline without the headset.
+            if dump_raw {
+                println!(
+                    "{}",
+                    serde_json::json!({"type": "raw", "src": "usb", "hex": hex_of(payload)})
+                );
+            }
+
+            if let Ok(mut s) = stats.lock() {
+                s.received_notifications += 1;
+                s.last_payload_len = n;
+                s.last_notify_uuid = Some("usb".to_string());
+            }
+
+            let decoded = pipeline.push(USB_STREAM_UUID, payload);
+            if decoded.is_empty() {
+                if let Ok(mut s) = stats.lock() {
+                    s.decrypt_failures += 1;
+                }
+            }
+
+            for data in decoded {
+                if !streaming {
+                    streaming = true;
+                    let _ = state.send(DeviceState::Streaming);
+                    log::info!("USB stream decoding; key {:?}", pipeline.locked_key());
+                }
+                if tx.blocking_send(data).is_err() {
+                    log::info!("Receiver dropped; stopping the USB stream.");
+                    return Ok(());
+                }
+            }
+
+            if let Ok(mut s) = stats.lock() {
+                let p = pipeline.stats();
+                s.decoded_packets = p.decoded;
+                s.active_serial_candidate = pipeline.locked_key();
+            }
+        }
+
+        log::info!("USB stream stopped.");
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use streaming::UsbStreamer;
