@@ -12,17 +12,17 @@ its USB receiver: **127.5 Hz**, 14 channels, 0.5% packet loss.
 
 ---
 
-## Why this exists
+## What this headset needs
 
-`emotiv-rs` could not read this headset. It connected, reported success, and
-produced confident nonsense — every channel pinned to the hardware rails, a
-battery reading sweeping randomly between 0 and 100%, and contact-quality values
-outside the scale. Three separate faults caused it, and each masked the others.
+The EPOC+ reached through its USB receiver differs from the hardware
+`emotiv-rs` targets by default, in four independent ways. Each is documented
+below with the values measured on this unit, so the same work can be repeated
+on another.
 
-### 1. The Bluetooth service identifier was wrong
+### 1. The EPOC+ publishes its own Bluetooth service
 
-The crate only requests the `00001100-d102-11e1-9b23-00025b00a5a5` service
-family. The EPOC+ publishes an entirely different one:
+Where the newer models use the `00001100-d102-11e1-9b23-00025b00a5a5` family,
+this headset uses a different identifier range:
 
 ```
 81072f40-9f3d-11e3-a9dc-0002a5d5c51b
@@ -32,32 +32,33 @@ family. The EPOC+ publishes an entirely different one:
   ...2f44  read           six-byte status word
 ```
 
-A Web Bluetooth grant only reaches services it names in advance, so the
-connection failed with `NotFoundError: no accessible primary services on this
-device`. Notifications begin as soon as they are subscribed to — no start-stream
-command is required.
+A Web Bluetooth grant reaches only the services it names in advance, so this
+identifier has to be listed for the connection to find anything; otherwise it
+returns `NotFoundError: no accessible primary services on this device`.
+Notifications begin as soon as they are subscribed to — no start-stream command
+is required.
 
 ### 2. The decryption key comes from the receiver, not the headset
 
-This is the one that costs people days. The AES key is **not** derived from the
-serial printed on the headset or shown in the Launcher (`4A2C0290` here). It is
-derived from the **USB receiver's** serial — `UD201807260038EF` — using only its
-**last four characters**:
+This is the one most likely to cost you a day. The AES key is **not** derived
+from the serial printed on the headset or shown in the Launcher (`4A2C0290`
+here). It is derived from the **USB receiver's** serial — `UD201807260038EF` —
+using only its **last four characters**:
 
 ```
 k = [s[-1], s[-2], s[-2], s[-3], s[-3], s[-3], s[-2], s[-4],
      s[-1], s[-4], s[-2], s[-2], s[-4], s[-4], s[-2], s[-1]]
 ```
 
-AES-128-ECB. `emotiv-rs` instead required a serial of at least twelve
-characters, so when handed an eight-character one it synthesised padding
-(`EPOC4A2C0290`) and produced a key that decrypted to noise rather than failing.
+AES-128-ECB. This is the scheme `emokit` and `CyKit` implement for EPOC-era
+hardware, and it needs only four characters — so an eight-character serial is
+sufficient, and no twelve-character one exists to look for.
 
-### 3. The EPOC+ packet is not bit-packed
+### 3. The EPOC+ packet carries byte pairs, not bit-packed fields
 
-The crate unpacks 14-bit fields at explicit bit offsets. The EPOC+ sends plain
-**byte pairs**: a one-byte counter, then seven electrodes in bytes 2..16 and
-seven more in bytes 18..32, skipping bytes 16-17.
+Where other models pack 14-bit samples at explicit bit offsets, this one sends
+plain **byte pairs**: a one-byte counter, then seven electrodes in bytes 2..16
+and seven more in bytes 18..32, skipping bytes 16-17.
 
 ```
 microvolts = (b1 * 0.128205128205129) + 4201.02564096001
@@ -71,16 +72,16 @@ counters**, so any continuity check must filter on byte 1 first.
 ### 4. Only one USB interface carries EEG
 
 The receiver exposes two HID interfaces. Interface 1 (usage page `0xffff`)
-carries the data; interface 0 (`0xf0ff`) opens successfully and then delivers
-nothing. Discovery here reports only the former.
+carries the data; interface 0 (`0xf0ff`) opens successfully and then stays
+silent. Discovery here reports only the former, so the choice cannot go wrong.
 
 ---
 
 ## How to tell real EEG from a wrong key
 
-Decrypting with a wrong key yields uniformly random values, which are easy to
-mistake for a signal. These checks are decisive, and all are reported by the
-control panel:
+Decrypting with the wrong key yields uniformly random values, which are easy to
+mistake for a signal. These checks settle it, and the control panel reports all
+of them:
 
 | Check | Wrong key | Correct key |
 |---|---|---|
