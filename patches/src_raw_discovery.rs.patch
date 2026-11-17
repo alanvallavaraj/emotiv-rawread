@@ -1,5 +1,5 @@
---- /tmp/upstream_emotiv/emotiv-0.0.14/src/raw/discovery.rs	2006-07-24 02:21:28
-+++ /Users/vallava/Documents/emotiv-rs/src/raw/discovery.rs	2026-11-16 22:03:30
+--- a/src/raw/discovery.rs
++++ b/src/raw/discovery.rs
 @@ -41,13 +41,32 @@
  pub(crate) const EMOTIV_SERVICE_1103: Uuid =
      Uuid::from_u128(0x00001103_d102_11e1_9b23_00025b00a5a5);

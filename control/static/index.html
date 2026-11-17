@@ -55,10 +55,13 @@
   </section>
 
   <section class="panel">
-    <h2>3 &middot; Electrode contact quality</h2>
+    <h2>3 &middot; Electrode signal spread</h2>
     <div id="cq" class="cq"></div>
-    <p class="note">Scale is 0 to 4, 4 best. Grey means the headset has not reported a value for
-       that electrode yet.</p>
+    <p class="note">Measured here from the samples themselves &mdash; the standard deviation of
+       each electrode over the last few seconds &mdash; <strong>not</strong> the headset's own
+       contact-quality field, which this path does not decode. A well-seated electrode on a
+       resting head reads roughly 10&ndash;50 &micro;V. Much higher means a loose electrode,
+       movement or muscle activity; near zero means no signal at all.</p>
   </section>
 
   <section class="panel wide">

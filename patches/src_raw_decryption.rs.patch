@@ -1,5 +1,5 @@
---- /tmp/upstream_emotiv/emotiv-0.0.14/src/raw/decryption.rs	2006-07-24 02:21:28
-+++ /Users/vallava/Documents/emotiv-rs/src/raw/decryption.rs	2026-11-17 00:12:52
+--- a/src/raw/decryption.rs
++++ b/src/raw/decryption.rs
 @@ -11,8 +11,20 @@
  use anyhow::{anyhow, Result};
  
@@ -21,7 +21,19 @@
      aes_key: Vec<u8>,
      counter: u32,
      physical_min: f64,
-@@ -39,6 +51,7 @@
+@@ -20,6 +32,11 @@
+     digital_max: i32,
+ }
+ 
++/// Second byte of a decrypted EPOC+ frame: 16 marks a sample frame, 32 a
++/// motion frame. The two interleave on one USB endpoint with independent
++/// counters, so this byte is the only thing that tells them apart there.
++pub const MOTION_FRAME_MARKER: u8 = 32;
++
+ impl Decryptor {
+     /// Create a new decryptor for a headset.
+     pub fn new(model: HeadsetModel, serial: String) -> Result<Self> {
+@@ -39,6 +56,7 @@
  
          Ok(Self {
              model,
@@ -29,7 +41,7 @@
              aes_key,
              counter: 0,
              physical_min,
-@@ -47,6 +60,85 @@
+@@ -47,6 +65,85 @@
          })
      }
  
@@ -68,7 +80,7 @@
 +    /// 16 and 17 are skipped. The microvolt conversion is the one the EPOC+
 +    /// firmware uses, reproduced from CyKit.
 +    ///
-+    /// Packets whose second byte is 32 carry no motion payload and are
++    /// Packets whose second byte is [`MOTION_FRAME_MARKER`] carry no motion payload and are
 +    /// rejected, matching CyKit, which drops them rather than decoding.
 +    fn decode_epoc_plus_pairs(&mut self, decrypted: &[u8]) -> Result<DecryptedData> {
 +        if decrypted.len() < 32 {
@@ -77,7 +89,7 @@
 +                decrypted.len()
 +            ));
 +        }
-+        if decrypted[1] == 32 {
++        if decrypted[1] == MOTION_FRAME_MARKER {
 +            return Err(anyhow!("EPOC+ packet carries no sample payload"));
 +        }
 +
@@ -115,21 +127,43 @@
      /// Decrypt and extract EEG data from a BLE/USB packet.
      pub fn decrypt_eeg_packet(&mut self, encrypted_data: &[u8]) -> Result<DecryptedData> {
          if encrypted_data.len() < 20 {
-@@ -55,6 +147,10 @@
- 
+@@ -56,6 +153,10 @@
          // Decrypt using AES-ECB
          let decrypted = aes_ecb_decrypt(&self.aes_key, encrypted_data)?;
-+
+ 
 +        if self.format == PacketFormat::EpocPlusPairs {
 +            return self.decode_epoc_plus_pairs(&decrypted);
 +        }
- 
++
          // Extract counter (bytes 0-1)
          let packet_counter = u16::from_be_bytes([decrypted[0], decrypted[1]]) as u32;
-@@ -418,3 +514,82 @@
-         assert!(samples[0] > 0);
+         self.counter = packet_counter;
+@@ -91,6 +192,19 @@
+         );
+ 
+         Ok(data)
++    }
++
++    /// Whether this packet is a motion frame rather than a sample frame.
++    ///
++    /// The Bluetooth transport separates the two by characteristic, but the
++    /// USB receiver interleaves them on one endpoint, where only the packet's
++    /// own type byte distinguishes them. Costs one AES block; the caller is
++    /// already about to decrypt.
++    pub fn is_motion_packet(&self, encrypted_data: &[u8]) -> bool {
++        self.format == PacketFormat::EpocPlusPairs
++            && self
++                .decrypt_raw(encrypted_data)
++                .is_ok_and(|raw| raw.len() >= 32 && raw[1] == MOTION_FRAME_MARKER)
      }
- }
+ 
+     /// Decrypt a packet without interpreting it — for streams whose layout is
+@@ -416,5 +530,84 @@
+         let samples = extract_14bit_samples(&data, 2);
+         assert_eq!(samples.len(), 2);
+         assert!(samples[0] > 0);
++    }
++}
 +
 +
 +/// Key derivations used by the open-source EPOC drivers.
@@ -165,7 +199,7 @@
 +        }
 +        let (a, b, c, d) = (s[n - 1] as u8, s[n - 2] as u8, s[n - 3] as u8, s[n - 4] as u8);
 +        Some(vec![a, 0x00, b, 0x15, c, 0x00, d, 0x0C, c, 0x00, b, b'D', a, 0x00, b, b'X'])
-+    }
+     }
 +
 +    /// emokit's `crypto_key` with `is_research = false`.
 +    pub fn consumer(serial: &str) -> Option<Vec<u8>> {
@@ -196,7 +230,7 @@
 +        ("consumer", consumer),
 +        ("research", research),
 +    ];
-+}
+ }
 +
 +
 +/// The EPOC+ byte-pair to microvolt conversion used by the firmware.

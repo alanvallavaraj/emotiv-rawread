@@ -1,5 +1,5 @@
---- /tmp/upstream_emotiv/emotiv-0.0.14/src/raw/stream.rs	2006-07-24 02:21:28
-+++ /Users/vallava/Documents/emotiv-rs/src/raw/stream.rs	2026-11-16 23:43:44
+--- a/src/raw/stream.rs
++++ b/src/raw/stream.rs
 @@ -35,6 +35,22 @@
      let stop = Arc::new(Notify::new());
      let stats = Arc::new(Mutex::new(StreamDebugStats::default()));

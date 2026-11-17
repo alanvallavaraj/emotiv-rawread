@@ -1,0 +1,12 @@
+--- a/src/bin/tui/native.rs
++++ b/src/bin/tui/native.rs
+@@ -867,7 +867,8 @@
+         let client_id = std::env::var("EMOTIV_CLIENT_ID").unwrap_or_else(|_|"your_client_id".into());
+         let client_secret = std::env::var("EMOTIV_CLIENT_SECRET").unwrap_or_else(|_|"your_client_secret".into());
+         tokio::spawn(async move {
+-            let config = emotiv::client::CortexClientConfig{client_id,client_secret,..Default::default()};
++            let license = std::env::var("EMOTIV_LICENSE").unwrap_or_default();
++            let config = emotiv::client::CortexClientConfig{client_id,client_secret,license,..Default::default()};
+             let client = emotiv::client::CortexClient::new(config);
+             match client.connect().await {
+                 Ok((mut rx,handle)) => {

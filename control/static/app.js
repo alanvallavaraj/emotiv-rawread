@@ -79,24 +79,35 @@ function pushSamples(block) {
 }
 
 function updateCq(values) {
-  if (!values || !values.length) { return; }
+  // The headset's own contact-quality field is not decoded on this path, so
+  // the tiles report a MEASURED quantity instead: each electrode's standard
+  // deviation over the trace buffer. That answers the same practical question
+  // - which electrode is badly seated - without inventing a value.
   cq = values;
-  // All-zero means the stream carries no contact quality - the EPOC+ receiver
-  // path does not decode it yet. Painting that as "0 / 4" in red claims bad
-  // electrode contact, which is a different and false statement.
-  var reported = false;
-  for (var k = 0; k < values.length; k++) { if (values[k] > 0) { reported = true; break; } }
-  for (var i = 0; i < values.length; i++) {
-    var node = el("el-" + i);
+}
+
+function refreshSpread() {
+  if (!ring.length || filled < 32) { return; }
+  for (var c = 0; c < ring.length; c++) {
+    var node = el("el-" + c);
     if (!node) { continue; }
-    if (!reported) {
-      node.className = "el";
-      node.lastChild.textContent = "not reported";
-      continue;
+    var buf = ring[c], n = filled, sum = 0, k, idx;
+    for (k = 0; k < n; k++) {
+      idx = (head - n + k + BUF * 2) % BUF;
+      sum += buf[idx];
     }
-    var q = Math.max(0, Math.min(4, values[i] | 0));
-    node.className = "el q" + q;
-    node.lastChild.textContent = q + " / 4";
+    var mean = sum / n, ss = 0, d;
+    for (k = 0; k < n; k++) {
+      idx = (head - n + k + BUF * 2) % BUF;
+      d = buf[idx] - mean;
+      ss += d * d;
+    }
+    var sd = Math.sqrt(ss / n);
+    // Bands chosen from measured data: a seated electrode on a resting head
+    // sits around 10-50 uV; 302 uV was a visibly loose one.
+    var band = sd < 2 ? 0 : sd < 10 ? 2 : sd <= 60 ? 4 : sd <= 150 ? 2 : 1;
+    node.className = "el q" + band;
+    node.lastChild.textContent = (sd < 100 ? sd.toFixed(1) : Math.round(sd)) + " \u00b5V";
   }
 }
 
@@ -265,6 +276,8 @@ function draw() {
   }
   requestAnimationFrame(draw);
 }
+
+setInterval(refreshSpread, 1000);
 
 // ---- controls --------------------------------------------------------------
 

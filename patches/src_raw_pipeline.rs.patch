@@ -1,6 +1,55 @@
---- /tmp/upstream_emotiv/emotiv-0.0.14/src/raw/pipeline.rs	2006-07-24 02:21:28
-+++ /Users/vallava/Documents/emotiv-rs/src/raw/pipeline.rs	2026-11-17 00:02:38
-@@ -552,6 +552,25 @@
+--- a/src/raw/pipeline.rs
++++ b/src/raw/pipeline.rs
+@@ -326,6 +326,18 @@
+     }
+ 
+     fn decode_locked(&mut self, packet: &[u8], now: f64) -> Option<DecryptedData> {
++        // The Bluetooth transport puts motion on its own characteristic, so the
++        // routing above catches it. The USB receiver interleaves motion and
++        // sample frames on one endpoint, where only the packet's own type byte
++        // separates them — without this check every motion frame reaches the
++        // sample decoder, is correctly rejected, and is then miscounted as a
++        // decode failure (about one packet in five, the motion rate).
++        let index = self.lock.as_ref()?.index;
++        if self.candidates[index].decryptor.is_motion_packet(packet) {
++            self.decode_motion(packet);
++            return None;
++        }
++
+         let lock = self.lock.as_mut()?;
+         let decoded = match self.candidates[lock.index]
+             .decryptor
+@@ -402,13 +414,24 @@
+ 
+     fn fail(&mut self) {
+         self.stats.failures += 1;
+-        if self.stats.failures.is_multiple_of(50) {
+-            log::warn!(
+-                "{} of {} BLE notifications not decoded ({}). Check the serial (EMOTIV_RAW_SERIAL).",
++        if !self.stats.failures.is_multiple_of(50) {
++            return;
++        }
++        // Say plainly whether this is a problem. Before a key is found,
++        // undecoded packets are the search working. After it, they are losses.
++        match self.lock.is_some() {
++            true => log::warn!(
++                "{} of {} packets failed to decode under the locked key ({:.1}%). \
++                 If this keeps climbing, check the serial (EMOTIV_RAW_SERIAL).",
+                 self.stats.failures,
+                 self.stats.received,
+-                if self.lock.is_some() { "locked key failing" } else { "no key confirmed yet" },
+-            );
++                100.0 * self.stats.failures as f64 / self.stats.received.max(1) as f64,
++            ),
++            false => log::info!(
++                "Still searching for the key: {} of {} packets undecoded so far.",
++                self.stats.failures,
++                self.stats.received,
++            ),
+         }
+     }
+ }
+@@ -552,6 +575,25 @@
              }
          }
      }

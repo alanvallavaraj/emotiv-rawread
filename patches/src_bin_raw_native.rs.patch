@@ -1,5 +1,5 @@
---- /tmp/upstream_emotiv/emotiv-0.0.14/src/bin/raw/native.rs	2006-07-24 02:21:28
-+++ /Users/vallava/Documents/emotiv-rs/src/bin/raw/native.rs	2026-11-17 09:45:49
+--- a/src/bin/raw/native.rs
++++ b/src/bin/raw/native.rs
 @@ -22,11 +22,15 @@
      let args: Vec<String> = std::env::args().collect();
      let debug_view = args.contains(&"--debug-view".to_string());

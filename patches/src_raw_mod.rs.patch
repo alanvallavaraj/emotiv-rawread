@@ -1,5 +1,5 @@
---- /tmp/upstream_emotiv/emotiv-0.0.14/src/raw/mod.rs	2006-07-24 02:21:28
-+++ /Users/vallava/Documents/emotiv-rs/src/raw/mod.rs	2026-11-16 21:24:09
+--- a/src/raw/mod.rs
++++ b/src/raw/mod.rs
 @@ -41,6 +41,8 @@
  pub mod discovery;
  pub mod pipeline;
